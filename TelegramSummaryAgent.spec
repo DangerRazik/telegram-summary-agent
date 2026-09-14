@@ -1,13 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
+from pathlib import Path
+
+project_dir = Path(SPECPATH)
 
 datas = []
 datas += collect_data_files('customtkinter')
 
 
 a = Analysis(
-    ['C:/Users/Пользователь/PycharmProjects/telegram_summary/desktop_entry.py'],
-    pathex=[],
+    [str(project_dir / 'desktop_entry.py')],
+    pathex=[str(project_dir)],
     binaries=[],
     datas=datas,
     hiddenimports=['pystray._win32'],
