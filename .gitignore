@@ -1,0 +1,29 @@
+# Секреты
+.env
+
+# Telegram
+*.session
+*.session-journal
+telegram_login_status.json
+
+# Локальные настройки приложения
+schedule_settings.json
+
+# База данных
+*.db
+*.sqlite
+*.sqlite3
+
+# Окружение
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# PyCharm
+.idea/
+
+# Логи
+*.log
