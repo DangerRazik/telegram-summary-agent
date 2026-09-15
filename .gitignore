@@ -4,10 +4,14 @@
 # Telegram
 *.session
 *.session-journal
+*.session-*
+*.session.*.bak
 telegram_login_status.json
 
 # Локальные настройки приложения
 schedule_settings.json
+proxy_settings.json
+proxy_settings.tmp
 
 # База данных
 *.db

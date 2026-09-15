@@ -6,8 +6,6 @@ import math
 import unicodedata
 import tkinter as tk
 import json
-from pathlib import Path
-from uuid import uuid4
 from app_paths import data_path
 from entry_clipboard import enable_paste
 from visual_assets import icon as ui_icon
@@ -149,34 +147,36 @@ class LoginFrame(ctk.CTkFrame):
         self.task = None
         self.closed = False
         card = ctk.CTkFrame(self, fg_color='#0c2033', corner_radius=18,
-                           border_width=1, border_color='#1c3c57')
+                            border_width=1, border_color='#1c3c57')
         card.place(relx=.5, rely=.5, anchor='center')
         self.heading = ctk.CTkLabel(card, text='Вход в Telegram', image=ui_icon('logo', 56),
                                     compound='left', padx=10, font=('Segoe UI', 26, 'bold'))
         self.heading.pack(padx=40, pady=(32, 14))
         self.hint = ctk.CTkLabel(card, text='', width=390, wraplength=390,
-                                font=('Segoe UI', 14), text_color='#94a3b8')
+                                 font=('Segoe UI', 14), text_color='#94a3b8')
         self.hint.pack(padx=32, pady=(0, 20))
         # A StringVar is the single source of truth. Placeholder state must not
         # make a visibly filled CTkEntry return an empty string after disabling.
         self.input_value = tk.StringVar(master=self)
         self.entry = ctk.CTkEntry(card, width=390, height=46,
-                                 textvariable=self.input_value)
+                                  textvariable=self.input_value)
         self.entry.pack(padx=32)
         self.entry.bind('<Return>', lambda event: self.submit())
         enable_paste(self.entry)
         self.error = ctk.CTkLabel(card, text='', width=390, wraplength=390,
-                                 text_color='#ef4444')
+                                  text_color='#ef4444')
         self.error.pack(padx=32, pady=10)
         self.button = ctk.CTkButton(card, text='Подключиться', width=390, height=44,
                                     command=self.submit)
         self.button.pack(padx=32, pady=(0, 12))
+        self.proxy_button = None
+        if hasattr(master, 'open_proxy_settings'):
+            self.proxy_button = ctk.CTkButton(card, text='Прокси Telegram', fg_color='transparent',
+                                              text_color='#9ab3cf', command=master.open_proxy_settings)
         self.resend_button = ctk.CTkButton(card, text='Получить новый код',
-                                          fg_color='transparent', command=self.resend)
+                                           fg_color='transparent', command=self.resend)
         self.back = ctk.CTkButton(card, text='Изменить номер',
-                                 fg_color='transparent', command=self.change_phone)
-        self.reset_button = ctk.CTkButton(card, text='Не приходит код? Начать вход заново',
-                                         fg_color='transparent', command=self.reset_login)
+                                  fg_color='transparent', command=self.change_phone)
         self.render()
         self.timer = self.after(500, self.tick)
 
@@ -207,30 +207,24 @@ class LoginFrame(ctk.CTkFrame):
         self.resend_button.configure(state='disabled')
         self.resend_button.pack_forget()
         self.back.pack_forget()
-        self.reset_button.pack_forget()
-        if stage == 'code':
-            self.resend_button.pack(padx=32, pady=(0, 8))
+        if self.proxy_button is not None:
+            self.proxy_button.pack_forget()
         if stage in ('code', 'password'):
-            self.back.pack(padx=32, pady=(0, 28))
-        if stage == 'code' and self.reset_client is not None:
-            self.reset_button.configure(state='normal')
-            self.reset_button.pack(padx=32, pady=(0, 20))
+            self.back.pack(padx=32, pady=(0, 4))
+        if stage == 'code':
+            self.resend_button.pack(padx=32, pady=(0, 4))
+        if self.proxy_button is not None:
+            self.proxy_button.pack(padx=32, pady=(8, 20))
 
     def change_phone(self):
-        if self.task and not self.task.done():
-            return
-        self.flow.change_phone()
-        self.input_value.set('')
-        self.error.configure(text='')
-        self.render()
+        self.submit(reset=True)
 
     def resend(self):
         self.submit(resend=True)
 
-    def reset_login(self):
-        self.submit(reset=True)
-
     def submit(self, resend=False, reset=False):
+        if getattr(self, 'connection_blocked', False):
+            return
         if self.closed or (self.task and not self.task.done()):
             return
         value = self.input_value.get()
@@ -239,7 +233,6 @@ class LoginFrame(ctk.CTkFrame):
         self.button.configure(state='disabled', text='Подождите…')
         self.back.configure(state='disabled')
         self.resend_button.configure(state='disabled')
-        self.reset_button.configure(state='disabled')
         self.error.configure(text='')
         self.task = self.flow.client.loop.create_task(self.run(value, resend, reset))
 
@@ -285,28 +278,28 @@ class LoginFrame(ctk.CTkFrame):
         if getattr(self, 'timer', None):
             self.after_cancel(self.timer)
         super().destroy()
+
+
 async def reset_pending_client(client, factory):
-    """Rotate only a server-confirmed unauthorised session; retain a backup."""
+    """Reset only a server-confirmed unauthorised Windows credential."""
     if not client.is_connected():
         await client.connect()
     # get_me checks the server instead of relying on the authorization cache.
     if await client.get_me() is not None:
         raise ValueError('Вход уже выполнен. Авторизованная сессия не была сброшена.')
-    filename = getattr(client.session, 'filename', None)
-    if not filename or filename == ':memory:':
-        raise ValueError('Не удалось определить файл сессии. Сброс не выполнен.')
-    path = Path(filename).resolve()
+    from credential_session import CredentialSession
+    from telethon.sessions import StringSession
+    if not isinstance(client.session, CredentialSession):
+        raise ValueError('Сброс доступен только для сессии в хранилище Windows.')
     await client.disconnect()
-    backup = path.with_name(path.name + '.unfinished-' + uuid4().hex + '.bak')
-    moved = False
+    previous = StringSession.save(client.session)
+    store = client.session.store
     try:
-        if path.exists():
-            path.rename(backup)
-            moved = True
-        replacement = factory(str(path))
+        replacement = factory(CredentialSession(store=store, value=''))
+        store.delete()
     except Exception:
-        if moved and not path.exists():
-            backup.rename(path)
+        if previous and store.read() != previous:
+            store.write(previous)
         raise
     auth_status('session_reset')
     return replacement

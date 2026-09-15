@@ -5,13 +5,15 @@ import time
 from schedule import Schedule
 from app_paths import data_path, load_config
 from summary_modes import SUMMARY_MODES
-from bot_delivery import BOT_URL, BotDeliveryError, check_bot, send_bot_message
+from bot_delivery import BOT_URL, BotDeliveryError, check_bot, send_bot_message, configure_proxy
 from entry_clipboard import enable_paste
 from datetime import datetime, timezone, timedelta
 
 import customtkinter as ctk
 from visual_assets import icon as ui_icon
 from styled_controls import Select
+from proxy_settings import ProxySettings
+from credential_session import CredentialSession
 
 from tkinter import messagebox, Toplevel
 from telethon.sync import TelegramClient
@@ -27,11 +29,11 @@ from database import (
     update_last_message,
     save_collected_summary,
     get_pending_delivery,
+    retarget_pending_delivery,
     mark_delivered
 )
 
 from summarizer import summarize_text
-
 
 # ============================================================
 # НАСТРОЙКИ
@@ -47,14 +49,27 @@ if not api_id or not api_hash:
         "Не указаны TELEGRAM_API_ID или TELEGRAM_API_HASH в .env"
     )
 
+proxy_error = ''
+try:
+    startup_proxy = ProxySettings.load()
+except ValueError as error:
+    startup_proxy = ProxySettings()
+    proxy_error = str(error)
 
-client = TelegramClient(
-    str(data_path("telegram_summary_session.session")),
-    int(api_id),
-    api_hash,
-    flood_sleep_threshold=0
-)
 
+configure_proxy(startup_proxy, proxy_error)
+
+def create_telegram_client(session):
+    return TelegramClient(
+        session,
+        int(api_id),
+        api_hash,
+        flood_sleep_threshold=0,
+        **startup_proxy.client_options()
+    )
+
+
+client = create_telegram_client(CredentialSession())
 
 # ============================================================
 # ТЕМА
@@ -62,7 +77,6 @@ client = TelegramClient(
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
-
 
 # ============================================================
 # ЦВЕТА
@@ -161,8 +175,8 @@ def get_initials(name):
         return words[0][:2].upper()
 
     return (
-        words[0][0]
-        + words[1][0]
+            words[0][0]
+            + words[1][0]
     ).upper()
 
 
@@ -186,13 +200,25 @@ class App(ctk.CTk):
         from telegram_login import LoginFrame
         self._login = LoginFrame(self, client, self._login_complete, self._reset_login_client)
         self._login.pack(fill='both', expand=True)
-        self.after(0, self._login.submit)
+        if proxy_error:
+            self._login.connection_blocked = True
+            self._login.error.configure(text=proxy_error)
+            self._login.button.configure(state='disabled')
+        else:
+            self.after(0, self._login.submit)
+
+    def open_proxy_settings(self):
+        from proxy_dialog import ProxyDialog
+        dialog = getattr(self, '_proxy_dialog', None)
+        if dialog is not None and dialog.winfo_exists():
+            dialog.lift()
+            return
+        self._proxy_dialog = ProxyDialog(self, client.loop, api_id, api_hash)
 
     async def _reset_login_client(self):
         global client
         from telegram_login import reset_pending_client
-        client = await reset_pending_client(client, lambda filename: TelegramClient(
-            filename, int(api_id), api_hash, flood_sleep_threshold=0))
+        client = await reset_pending_client(client, create_telegram_client)
         return client
 
     def _login_complete(self):
@@ -258,12 +284,13 @@ class App(ctk.CTk):
         self.sources_button = self.create_sidebar_button('Источники', lambda: self.show_page('sources'), 3)
         self.summary_button = self.create_sidebar_button('Сводка', lambda: self.show_page('summary'), 4)
         self.settings_button = self.create_sidebar_button('Настройки', lambda: self.show_page('settings'), 5)
+
     def create_sidebar_button(self, text, command, row):
         kind = {'Источники': 'document', 'Сводка': 'summary', 'Настройки': 'settings'}[text]
         button = ctk.CTkButton(self.sidebar, text=text, image=ui_icon(kind, 30, '#b9d6f7'),
-            compound="left", border_spacing=16, command=command, height=58,
-            corner_radius=12, anchor="w", font=ctk.CTkFont(size=16, weight="bold"),
-            fg_color="transparent", hover_color=BUTTON_DARK_HOVER, text_color=TEXT)
+                               compound="left", border_spacing=16, command=command, height=58,
+                               corner_radius=12, anchor="w", font=ctk.CTkFont(size=16, weight="bold"),
+                               fg_color="transparent", hover_color=BUTTON_DARK_HOVER, text_color=TEXT)
         button.grid(row=row, column=0, padx=18, pady=5, sticky="ew")
         return button
 
@@ -682,7 +709,7 @@ class App(ctk.CTk):
 
     def create_stat_card(self, parent, column, value, title, icon):
         card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=15,
-                           border_width=1, border_color=BORDER, height=100)
+                            border_width=1, border_color=BORDER, height=100)
         card.grid(row=0, column=column,
                   padx=(0 if column == 0 else 6, 0 if column == 3 else 6), sticky="ew")
         card.grid_propagate(False)
@@ -695,7 +722,7 @@ class App(ctk.CTk):
         info = ctk.CTkFrame(card, fg_color="transparent")
         info.grid(row=0, column=1, padx=(0, 12), sticky="ew")
         value_label = ctk.CTkLabel(info, text=value, height=26, anchor="w",
-            text_color=TEXT, font=ctk.CTkFont(size=14 if column == 3 else 21, weight="bold"))
+                                   text_color=TEXT, font=ctk.CTkFont(size=14 if column == 3 else 21, weight="bold"))
         value_label.pack(anchor="w")
         ctk.CTkLabel(info, text=title, height=22, anchor="w", text_color=TEXT_SECONDARY,
                      font=ctk.CTkFont(size=12)).pack(anchor="w")
@@ -708,8 +735,8 @@ class App(ctk.CTk):
 
     def refresh_channels(self):
         if not hasattr(
-            self,
-            "channels_frame"
+                self,
+                "channels_frame"
         ):
             return
 
@@ -722,8 +749,8 @@ class App(ctk.CTk):
         search = ""
 
         if hasattr(
-            self,
-            "search_entry"
+                self,
+                "search_entry"
         ):
             search = (
                 self.search_entry.get()
@@ -738,9 +765,9 @@ class App(ctk.CTk):
             username = channel[2]
 
             if (
-                search
-                and search not in name.lower()
-                and search not in username.lower()
+                    search
+                    and search not in name.lower()
+                    and search not in username.lower()
             ):
                 continue
 
@@ -775,8 +802,8 @@ class App(ctk.CTk):
     # ========================================================
 
     def update_statistics(
-        self,
-        channels
+            self,
+            channels
     ):
         total = len(channels)
 
@@ -819,25 +846,26 @@ class App(ctk.CTk):
     def create_channel_row(self, channel):
         channel_id, name, username, enabled, _, last_date = channel
         row = ctk.CTkFrame(self.channels_frame, fg_color=BUTTON_DARK, corner_radius=12,
-                          height=90, border_width=1, border_color=BORDER)
+                           height=90, border_width=1, border_color=BORDER)
         row.pack(fill="x", pady=5, padx=3)
         row.grid_propagate(False)
         row.grid_rowconfigure(0, weight=1)
         row.grid_columnconfigure(1, weight=3)
         row.grid_columnconfigure(2, weight=2)
         avatar = ctk.CTkLabel(row, text=get_initials(name), width=46, height=46,
-            corner_radius=23, fg_color="#174b76" if enabled else "#26394a",
-            text_color=TEXT, font=ctk.CTkFont(size=14, weight="bold"))
+                              corner_radius=23, fg_color="#174b76" if enabled else "#26394a",
+                              text_color=TEXT, font=ctk.CTkFont(size=14, weight="bold"))
         avatar.grid(row=0, column=0, padx=(16, 14))
         info = ctk.CTkFrame(row, fg_color="transparent", width=180, height=54)
         info.pack_propagate(False)
         info.grid(row=0, column=1, padx=(0, 12), sticky="ew")
         title = ctk.CTkLabel(info, text=name, height=25, anchor="w",
-            text_color=TEXT if enabled else TEXT_SECONDARY, font=ctk.CTkFont(size=15, weight="bold"))
+                             text_color=TEXT if enabled else TEXT_SECONDARY, font=ctk.CTkFont(size=15, weight="bold"))
         title.pack(anchor="w", fill="x")
         handle = ctk.CTkLabel(info, text=f"@{username}", height=22, anchor="w",
-            text_color=TEXT_SECONDARY, font=ctk.CTkFont(size=12))
+                              text_color=TEXT_SECONDARY, font=ctk.CTkFont(size=12))
         handle.pack(anchor="w", fill="x", pady=(3, 0))
+
         # Ellipsis keeps long names from pushing the date and controls out of view.
         def fit_text(event):
             for label, full in ((title, name), (handle, f"@{username}")):
@@ -846,32 +874,33 @@ class App(ctk.CTk):
                 while shown and font.measure(shown + ('…' if shown != full else '')) > event.width - 4:
                     shown = shown[:-1]
                 label.configure(text=shown + ('…' if shown != full else ''))
+
         info.bind('<Configure>', fit_text)
         date = ctk.CTkFrame(row, fg_color="transparent")
         date.grid(row=0, column=2, padx=(10, 16), sticky="w")
         ctk.CTkLabel(date, text="Последнее сообщение · МСК", height=22,
-            text_color=TEXT_SECONDARY, font=ctk.CTkFont(size=11)).pack(anchor="w")
+                     text_color=TEXT_SECONDARY, font=ctk.CTkFont(size=11)).pack(anchor="w")
         ctk.CTkLabel(date, text=format_date(last_date), height=24,
-            text_color=TEXT, font=ctk.CTkFont(size=12)).pack(anchor="w")
+                     text_color=TEXT, font=ctk.CTkFont(size=12)).pack(anchor="w")
         state = ctk.CTkFrame(row, fg_color="transparent", width=90, height=52)
         state.pack_propagate(False)
         state.grid(row=0, column=3, padx=(0, 16))
         switch = ctk.CTkSwitch(state, text="", width=44, progress_color=BLUE,
-            fg_color="#36526d", button_color="#e5f2ff", button_hover_color="#ffffff")
+                               fg_color="#36526d", button_color="#e5f2ff", button_hover_color="#ffffff")
         switch.pack(anchor="center")
         if enabled:
             switch.select()
         switch.configure(command=lambda: self.toggle_channel(channel_id, switch))
         status_label = ctk.CTkLabel(state, text="Активен" if enabled else "Отключён", height=22,
-            font=ctk.CTkFont(size=11), text_color=GREEN if enabled else TEXT_SECONDARY)
+                                    font=ctk.CTkFont(size=11), text_color=GREEN if enabled else TEXT_SECONDARY)
         status_label.pack(pady=(3, 0))
         self._channel_rows[channel_id] = {'status': status_label, 'title': title,
-                                         'avatar': avatar, 'username': username}
+                                          'avatar': avatar, 'username': username}
         self._request_avatar(channel_id, username)
         ctk.CTkButton(row, text="", image=ui_icon('trash', 23, '#aac5e3'),
-            width=38, height=38, corner_radius=9, fg_color="#15304a",
-            hover_color="#573044", border_width=1, border_color=BORDER,
-            command=lambda: self.remove_channel(channel_id, name)).grid(row=0, column=4, padx=(0, 14))
+                      width=38, height=38, corner_radius=9, fg_color="#15304a",
+                      hover_color="#573044", border_width=1, border_color=BORDER,
+                      command=lambda: self.remove_channel(channel_id, name)).grid(row=0, column=4, padx=(0, 14))
 
     # ========================================================
     # TOGGLE
@@ -899,11 +928,13 @@ class App(ctk.CTk):
             ImageDraw.Draw(mask).ellipse((0, 0, 137, 137), fill=255)
             picture.putalpha(mask)
             return picture
+
         try:
             async with self._avatar_slots:
                 raw = await asyncio.wait_for(client.download_profile_photo(username, file=bytes), timeout=20)
                 picture = await asyncio.to_thread(decode, raw) if raw else None
-            self._avatar_cache[username] = ctk.CTkImage(picture, picture, size=(46, 46)) if picture is not None else None
+            self._avatar_cache[username] = ctk.CTkImage(picture, picture,
+                                                        size=(46, 46)) if picture is not None else None
             self._apply_avatar(channel_id, username)
         except asyncio.CancelledError:
             raise
@@ -914,9 +945,9 @@ class App(ctk.CTk):
             self._avatar_tasks.pop(username, None)
 
     def toggle_channel(
-        self,
-        channel_id,
-        switch
+            self,
+            channel_id,
+            switch
     ):
         enabled = switch.get()
 
@@ -942,9 +973,9 @@ class App(ctk.CTk):
     # ========================================================
 
     def remove_channel(
-        self,
-        channel_id,
-        name
+            self,
+            channel_id,
+            name
     ):
         result = messagebox.askyesno(
             "Удаление источника",
@@ -972,6 +1003,7 @@ class App(ctk.CTk):
         window = Toplevel(
             self
         )
+        window.withdraw()
 
         window.title(
             "Добавить источник"
@@ -986,7 +1018,7 @@ class App(ctk.CTk):
             False
         )
 
-        window.configure(bg=BG)
+        window.configure(bg="#0c2033")
 
         window.transient(
             self
@@ -1047,9 +1079,13 @@ class App(ctk.CTk):
         )
 
         button.pack()
+        from window_position import center_dialog
+        center_dialog(window, self)
+        window.deiconify()
+        entry.focus_set()
         window._add_button = button
         window.bind('<Destroy>', lambda event: self._cancel_add_source(window)
-                    if event.widget is window else None, add='+')
+        if event.widget is window else None, add='+')
 
     def _cancel_add_source(self, window):
         task = getattr(window, '_add_task', None)
@@ -1057,9 +1093,9 @@ class App(ctk.CTk):
             task.cancel()
 
     def add_new_channel(
-        self,
-        value,
-        window
+            self,
+            value,
+            window
     ):
         task = getattr(self, '_add_source_task', None)
         if task is not None and not task.done():
@@ -1073,7 +1109,8 @@ class App(ctk.CTk):
                 raise
             except Exception:
                 if window.winfo_exists():
-                    messagebox.showerror('Добавление источника', 'Не удалось сохранить источник. Повторите попытку.', parent=window)
+                    messagebox.showerror('Добавление источника', 'Не удалось сохранить источник. Повторите попытку.',
+                                         parent=window)
             finally:
                 if window.winfo_exists():
                     window._add_button.configure(state='normal', text='Добавить источник')
@@ -1202,8 +1239,6 @@ class App(ctk.CTk):
         self.sources_status_label.configure(
             text="● Собираю сообщения..."
         )
-
-
 
         for source_index, channel in enumerate(channels, 1):
             channel_id = channel[0]
@@ -1378,7 +1413,6 @@ class App(ctk.CTk):
             text="Сбор завершён с ошибками · Результат во вкладке «Сводка»" if errors else "Сбор завершён · Результат во вкладке «Сводка»"
         )
 
-
         self.collection_progress.set(1)
 
         if getattr(self, "_send_this_collection", False):
@@ -1391,27 +1425,31 @@ class App(ctk.CTk):
         try:
             saved_messages = await client.get_input_entity('me')
             account_id = (await client.get_me()).id
+            retarget_pending_delivery(account_id, self.schedule.delivery_target)
+            pending = get_pending_delivery()
             bot_checked = False
             for delivery_id, body, random_id, target, recipient_id in pending:
                 if recipient_id is not None and recipient_id != account_id:
-                    raise BotDeliveryError('В очереди есть сводки другого аккаунта. Войдите под исходным аккаунтом для их отправки.')
-                self.sources_status_label.configure(text="Отправляю сводку через бота…" if target == 'bot' else "Отправляю сводку в Избранное…")
+                    raise BotDeliveryError(
+                        'В очереди есть сводки другого аккаунта. Войдите под исходным аккаунтом для их отправки.')
+                self.sources_status_label.configure(
+                    text="Отправляю сводку через бота…" if target == 'bot' else "Отправляю сводку в Избранное…")
                 if target == 'bot':
                     if not bot_checked:
                         await check_bot()
                         bot_checked = True
-                    await send_bot_message(recipient_id, body)
+                    await send_bot_message(recipient_id, body, random_id=random_id)
                 else:
                     await client(SendMessageRequest(
                         peer=saved_messages, message=body, random_id=random_id, no_webpage=True))
                 mark_delivered(delivery_id)
         except Exception as error:
             self.sources_status_label.configure(text="Отправка отложена · Сводка сохранена в очереди")
-            self.delivery_hint.configure(text=(str(error) if isinstance(error, BotDeliveryError) else "Не удалось отправить. Повтор — при следующем сборе."))
+            self.delivery_hint.configure(text=(str(error) if isinstance(error,
+                                                                        BotDeliveryError) else "Не удалось отправить. Повтор — при следующем сборе."))
         else:
             self.sources_status_label.configure(text="Сбор завершён · Сводки отправлены")
             self.delivery_hint.configure(text="Последняя отправка: " + datetime.now().strftime("%d.%m.%Y %H:%M"))
-
 
     # ========================================================
     # СВОДКА
@@ -1635,7 +1673,7 @@ class App(ctk.CTk):
 
     def create_summary_info(self, parent, column, title, value):
         card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=14,
-                           border_width=1, border_color=BORDER, height=90)
+                            border_width=1, border_color=BORDER, height=90)
         card.grid(row=0, column=column, padx=6, sticky="ew")
         card.grid_propagate(False)
         card.grid_columnconfigure(0, weight=1)
@@ -1676,8 +1714,8 @@ class App(ctk.CTk):
         page.grid_columnconfigure(0, weight=1)
         page.grid_rowconfigure(1, weight=1)
         ctk.CTkLabel(page, text="Настройки", text_color=TEXT,
-            font=ctk.CTkFont(size=34, weight="bold")).grid(
-                row=0, column=0, padx=40, pady=(35, 20), sticky="w")
+                     font=ctk.CTkFont(size=34, weight="bold")).grid(
+            row=0, column=0, padx=40, pady=(35, 20), sticky="w")
         content = ctk.CTkScrollableFrame(page, fg_color="transparent")
         content.grid(row=1, column=0, padx=30, pady=(0, 5), sticky="nsew")
         content.grid_columnconfigure(0, weight=1)
@@ -1688,19 +1726,19 @@ class App(ctk.CTk):
             frame.grid(row=row, column=0, padx=8, pady=(0, 16), sticky="ew")
             frame.grid_columnconfigure(0, weight=1)
             ctk.CTkLabel(frame, text=title, text_color=TEXT,
-                image=ui_icon({'Автоматический сбор': 'clock', 'Доставка сводок': 'users',
-                               'Подробность сводки': 'document'}.get(title, 'settings'), 26),
-                compound="left", padx=8,
-                font=ctk.CTkFont(size=18, weight="bold")).grid(
-                    row=0, column=0, padx=24, pady=(20, 2), sticky="w")
+                         image=ui_icon({'Автоматический сбор': 'clock', 'Доставка сводок': 'users',
+                                        'Подробность сводки': 'document'}.get(title, 'settings'), 26),
+                         compound="left", padx=8,
+                         font=ctk.CTkFont(size=18, weight="bold")).grid(
+                row=0, column=0, padx=24, pady=(20, 2), sticky="w")
             ctk.CTkLabel(frame, text=description, text_color=TEXT_SECONDARY,
-                anchor="w", justify="left").grid(
-                    row=1, column=0, columnspan=2, padx=24, pady=(0, 18), sticky="w")
+                         anchor="w", justify="left").grid(
+                row=1, column=0, columnspan=2, padx=24, pady=(0, 18), sticky="w")
             return frame
 
         automatic = section(0, "Автоматический сбор", "Новые сводки по вашему расписанию")
         self.schedule_switch = ctk.CTkSwitch(automatic, text="", width=46, progress_color=BLUE,
-                                            command=self._update_schedule_fields)
+                                             command=self._update_schedule_fields)
         self.schedule_switch.grid(row=0, column=1, padx=24, pady=(20, 2), sticky="e")
         if self.schedule.enabled:
             self.schedule_switch.select()
@@ -1709,13 +1747,14 @@ class App(ctk.CTk):
         self.schedule_options.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(self.schedule_options, text="Расписание", text_color=TEXT).grid(row=0, column=0, sticky="w")
         self.schedule_mode_border = ctk.CTkFrame(self.schedule_options, corner_radius=12,
-            fg_color="transparent", border_width=0)
+                                                 fg_color="transparent", border_width=0)
         self.schedule_mode = Select(self.schedule_mode_border,
-            values=["Через равные интервалы", "Ежедневно"], width=250, height=42, corner_radius=10,
-            fg_color=BUTTON_DARK, button_color="#254663", button_hover_color="#315a7f",
-            dropdown_fg_color=CARD, dropdown_hover_color=BUTTON_DARK_HOVER,
-            text_color=TEXT, font=ctk.CTkFont(size=14), dropdown_font=ctk.CTkFont(size=14),
-            command=self._update_schedule_fields)
+                                    values=["Через равные интервалы", "Ежедневно"], width=250, height=42,
+                                    corner_radius=10,
+                                    fg_color=BUTTON_DARK, button_color="#254663", button_hover_color="#315a7f",
+                                    dropdown_fg_color=CARD, dropdown_hover_color=BUTTON_DARK_HOVER,
+                                    text_color=TEXT, font=ctk.CTkFont(size=14), dropdown_font=ctk.CTkFont(size=14),
+                                    command=self._update_schedule_fields)
         self.schedule_mode.set("Ежедневно" if self.schedule.mode == "daily" else "Через равные интервалы")
         self.schedule_mode.pack()
         self.schedule_mode_border.grid(row=0, column=1, sticky="e")
@@ -1723,7 +1762,8 @@ class App(ctk.CTk):
         self.interval_row.grid(row=1, column=0, columnspan=2, pady=(14, 0), sticky="ew")
         self.interval_row.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(self.interval_row, text="Повторять каждые", text_color=TEXT).grid(row=0, column=0, sticky="w")
-        self.interval_entry = ctk.CTkEntry(self.interval_row, width=90, height=38, corner_radius=8, border_width=1, border_color="#36546e", fg_color=BUTTON_DARK, text_color=TEXT)
+        self.interval_entry = ctk.CTkEntry(self.interval_row, width=90, height=38, corner_radius=8, border_width=1,
+                                           border_color="#36546e", fg_color=BUTTON_DARK, text_color=TEXT)
         self.interval_entry.insert(0, str(self.schedule.minutes))
         self.interval_entry.grid(row=0, column=1, padx=(0, 10))
         ctk.CTkLabel(self.interval_row, text="минут", text_color=TEXT_SECONDARY).grid(row=0, column=2)
@@ -1731,62 +1771,72 @@ class App(ctk.CTk):
         self.daily_row.grid(row=2, column=0, columnspan=2, pady=(14, 0), sticky="ew")
         self.daily_row.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(self.daily_row, text="Время сбора", text_color=TEXT).grid(row=0, column=0, sticky="w")
-        self.daily_entry = ctk.CTkEntry(self.daily_row, width=120, height=38, placeholder_text="09:00", corner_radius=8, border_width=1, border_color="#36546e", fg_color=BUTTON_DARK, text_color=TEXT)
+        self.daily_entry = ctk.CTkEntry(self.daily_row, width=120, height=38, placeholder_text="09:00", corner_radius=8,
+                                        border_width=1, border_color="#36546e", fg_color=BUTTON_DARK, text_color=TEXT)
         self.daily_entry.insert(0, self.schedule.daily_time)
         self.daily_entry.grid(row=0, column=1)
         self.schedule_hint = ctk.CTkLabel(automatic, text="", text_color=TEXT_SECONDARY, anchor="w")
         self.schedule_hint.grid(row=3, column=0, columnspan=2, padx=24, pady=(0, 18), sticky="ew")
 
         delivery = section(1, "Доставка сводок", "После ручного и автоматического сбора")
-        ctk.CTkLabel(delivery, text="Получатель", text_color=TEXT).grid(row=2, column=0, padx=24, pady=(0, 20), sticky="w")
+        ctk.CTkLabel(delivery, text="Получатель", text_color=TEXT).grid(row=2, column=0, padx=24, pady=(0, 20),
+                                                                        sticky="w")
         self.delivery_menu_border = ctk.CTkFrame(delivery, corner_radius=12,
-            fg_color="transparent", border_width=0)
-        self.delivery_menu = Select(self.delivery_menu_border, values=["Избранное в Telegram", "Telegram-бот"], command=self._update_delivery_fields, width=250, height=42, corner_radius=10,
-            fg_color=BUTTON_DARK, button_color="#254663", button_hover_color="#315a7f",
-            dropdown_fg_color=CARD, dropdown_hover_color=BUTTON_DARK_HOVER,
-            text_color=TEXT, font=ctk.CTkFont(size=14), dropdown_font=ctk.CTkFont(size=14))
+                                                 fg_color="transparent", border_width=0)
+        self.delivery_menu = Select(self.delivery_menu_border, values=["Избранное в Telegram", "Telegram-бот"],
+                                    command=self._update_delivery_fields, width=250, height=42, corner_radius=10,
+                                    fg_color=BUTTON_DARK, button_color="#254663", button_hover_color="#315a7f",
+                                    dropdown_fg_color=CARD, dropdown_hover_color=BUTTON_DARK_HOVER,
+                                    text_color=TEXT, font=ctk.CTkFont(size=14), dropdown_font=ctk.CTkFont(size=14))
         self.delivery_menu.pack()
         self.delivery_menu.set("Telegram-бот" if self.schedule.delivery_target == 'bot' else "Избранное в Telegram")
         self.delivery_menu_border.grid(row=2, column=1, padx=24, pady=(0, 20), sticky="e")
         self.bot_options = ctk.CTkFrame(delivery, fg_color='transparent')
         self.bot_options.grid(row=3, column=0, columnspan=2, padx=24, pady=(0, 16), sticky='ew')
-        ctk.CTkLabel(self.bot_options, text='Откройте @summaryAgent_bot и нажмите «Запустить» под тем же аккаунтом Telegram.',
+        ctk.CTkLabel(self.bot_options,
+                     text='Откройте @summaryAgent_bot и нажмите «Запустить» под тем же аккаунтом Telegram.',
                      wraplength=650, justify='left', text_color=TEXT_SECONDARY).pack(anchor='w', pady=(0, 10))
         buttons = ctk.CTkFrame(self.bot_options, fg_color='transparent')
         buttons.pack(anchor='w')
         ctk.CTkButton(buttons, text='Открыть бота', height=40, command=self._open_bot).pack(side='left', padx=(0, 10))
-        self.bot_check_button = ctk.CTkButton(buttons, text='Проверить подключение', height=40, command=self._check_bot_connection)
+        self.bot_check_button = ctk.CTkButton(buttons, text='Проверить подключение', height=40,
+                                              command=self._check_bot_connection)
         self.bot_check_button.pack(side='left')
         self.delivery_hint = ctk.CTkLabel(delivery, text="",
-                                         text_color=TEXT_SECONDARY, anchor="w", justify='left', wraplength=650)
+                                          text_color=TEXT_SECONDARY, anchor="w", justify='left', wraplength=650)
         self.delivery_hint.grid(row=4, column=0, columnspan=2, padx=24, pady=(0, 18), sticky="ew")
         self._update_delivery_fields()
 
         summary_options = section(2, "Подробность сводки", "Для ручного и автоматического сбора")
         self.summary_detail_border = ctk.CTkFrame(summary_options, corner_radius=12,
-            fg_color="transparent", border_width=0)
+                                                  fg_color="transparent", border_width=0)
         self.summary_detail_menu = Select(self.summary_detail_border,
-            values=[item[0] for item in SUMMARY_MODES.values()], width=250, height=42, corner_radius=10,
-            fg_color=BUTTON_DARK, button_color="#254663", button_hover_color="#315a7f",
-            dropdown_fg_color=CARD, dropdown_hover_color=BUTTON_DARK_HOVER,
-            text_color=TEXT, font=ctk.CTkFont(size=14), dropdown_font=ctk.CTkFont(size=14),
-            command=self._update_summary_detail_hint)
+                                          values=[item[0] for item in SUMMARY_MODES.values()], width=250, height=42,
+                                          corner_radius=10,
+                                          fg_color=BUTTON_DARK, button_color="#254663", button_hover_color="#315a7f",
+                                          dropdown_fg_color=CARD, dropdown_hover_color=BUTTON_DARK_HOVER,
+                                          text_color=TEXT, font=ctk.CTkFont(size=14),
+                                          dropdown_font=ctk.CTkFont(size=14),
+                                          command=self._update_summary_detail_hint)
         self.summary_detail_menu.set(SUMMARY_MODES[self.schedule.summary_detail][0])
         self.summary_detail_menu.pack()
         self.summary_detail_border.grid(row=2, column=0, padx=24, pady=(0, 12), sticky="w")
         self.summary_detail_hint = ctk.CTkLabel(summary_options, text="", text_color=TEXT_SECONDARY,
-                                               anchor="w", justify="left", wraplength=650)
+                                                anchor="w", justify="left", wraplength=650)
         self.summary_detail_hint.grid(row=3, column=0, columnspan=2, padx=24, pady=(0, 20), sticky="w")
         self._update_summary_detail_hint()
 
         other = section(3, "Работа приложения", "Закрытие окна скрывает приложение в трей рядом с часами Windows.")
+        ctk.CTkButton(other, text='Прокси Telegram', command=self.open_proxy_settings,
+                      height=38, fg_color=BUTTON_DARK, border_width=1, border_color=BORDER).grid(
+            row=6, column=0, columnspan=2, padx=24, pady=(0, 20), sticky='w')
         import autostart
         self.autostart_switch = ctk.CTkSwitch(other, text="Запускать вместе с Windows",
-            progress_color=BLUE, command=self._toggle_autostart)
+                                              progress_color=BLUE, command=self._toggle_autostart)
         self.autostart_switch.grid(row=4, column=0, columnspan=2, padx=24, pady=(0, 10), sticky="w")
         self.autostart_hint = ctk.CTkLabel(other,
-            text="Запуск в трее после входа в Windows. Применяется сразу.",
-            text_color=TEXT_SECONDARY, anchor="w")
+                                           text="Запуск в трее после входа в Windows. Применяется сразу.",
+                                           text_color=TEXT_SECONDARY, anchor="w")
         self.autostart_hint.grid(row=5, column=0, columnspan=2, padx=24, pady=(0, 20), sticky="w")
         try:
             if autostart.is_enabled():
@@ -1795,18 +1845,19 @@ class App(ctk.CTk):
             self.autostart_hint.configure(text="Не удалось проверить автозагрузку Windows.")
         ctk.CTkLabel(other, text="Постов при первом сборе источника", text_color=TEXT).grid(
             row=2, column=0, padx=24, pady=(0, 18), sticky="w")
-        self.limit_entry = ctk.CTkEntry(other, width=120, height=38, corner_radius=8, border_width=1, border_color="#36546e", fg_color=BUTTON_DARK, text_color=TEXT)
+        self.limit_entry = ctk.CTkEntry(other, width=120, height=38, corner_radius=8, border_width=1,
+                                        border_color="#36546e", fg_color=BUTTON_DARK, text_color=TEXT)
         self.limit_entry.insert(0, str(self.schedule.first_run_limit))
         for field in (self.limit_entry, self.interval_entry, self.daily_entry):
             enable_paste(field)
         self.limit_entry.grid(row=2, column=1, padx=24, pady=(0, 18), sticky="e")
         ctk.CTkLabel(other, text="Сбор продолжается в фоне. Полный выход — через меню значка в трее.\n"
-                     "Время — по часам компьютера. Во время сна или выключения сбор не выполняется.",
+                                 "Время — по часам компьютера. Во время сна или выключения сбор не выполняется.",
                      justify="left", anchor="w", text_color=TEXT_SECONDARY).grid(
-                         row=3, column=0, columnspan=2, padx=24, pady=(0, 20), sticky="w")
+            row=3, column=0, columnspan=2, padx=24, pady=(0, 20), sticky="w")
         ctk.CTkButton(page, text="Сохранить настройки", height=46, width=240, corner_radius=11,
-            fg_color=BLUE, hover_color=BLUE_HOVER, font=ctk.CTkFont(size=14, weight="bold"),
-            command=self.save_schedule).grid(row=2, column=0, padx=40, pady=(0, 25), sticky="e")
+                      fg_color=BLUE, hover_color=BLUE_HOVER, font=ctk.CTkFont(size=14, weight="bold"),
+                      command=self.save_schedule).grid(row=2, column=0, padx=40, pady=(0, 25), sticky="e")
         self._update_schedule_fields()
         self._update_schedule_hint()
 
@@ -1846,10 +1897,13 @@ class App(ctk.CTk):
         try:
             await check_bot()
             me = await client.get_me()
-            await send_bot_message(me.id, 'Summary Agent подключён. Сводки будут приходить в этот чат после выбора Telegram-бота и сохранения настроек в приложении.')
-            self.delivery_hint.configure(text='Подключено. Тестовое сообщение отправлено. Сохраните настройки, чтобы применить выбор.')
+            await send_bot_message(me.id,
+                                   'Summary Agent подключён. Сводки будут приходить в этот чат после выбора Telegram-бота и сохранения настроек в приложении.')
+            self.delivery_hint.configure(
+                text='Подключено. Тестовое сообщение отправлено. Сохраните настройки, чтобы применить выбор.')
         except Exception as error:
-            self.delivery_hint.configure(text=str(error) if isinstance(error, BotDeliveryError) else 'Не удалось проверить подключение. Повторите попытку.')
+            self.delivery_hint.configure(text=str(error) if isinstance(error,
+                                                                       BotDeliveryError) else 'Не удалось проверить подключение. Повторите попытку.')
         finally:
             if self.winfo_exists():
                 self.bot_check_button.configure(state='normal', text='Проверить подключение')
@@ -1890,8 +1944,10 @@ class App(ctk.CTk):
             schedule = Schedule(
                 enabled=bool(self.schedule_switch.get()),
                 mode="daily" if self.schedule_mode.get() == "Ежедневно" else "interval",
-                minutes=(int(self.interval_entry.get()) if self.schedule_switch.get() and self.schedule_mode.get() != "Ежедневно" else self.schedule.minutes),
-                daily_time=(self.daily_entry.get().strip() if self.schedule_switch.get() and self.schedule_mode.get() == "Ежедневно" else self.schedule.daily_time),
+                minutes=(
+                    int(self.interval_entry.get()) if self.schedule_switch.get() and self.schedule_mode.get() != "Ежедневно" else self.schedule.minutes),
+                daily_time=(
+                    self.daily_entry.get().strip() if self.schedule_switch.get() and self.schedule_mode.get() == "Ежедневно" else self.schedule.daily_time),
                 send_saved=True, first_run_limit=int(self.limit_entry.get()),
                 delivery_target='bot' if self.delivery_menu.get() == 'Telegram-бот' else 'saved',
                 summary_detail=next(key for key, item in SUMMARY_MODES.items()
@@ -2009,6 +2065,10 @@ def start_app():
         app.after(0, pump_network)
         app.mainloop()
     finally:
+        proxy_task = getattr(getattr(locals().get('app'), '_proxy_dialog', None), 'task', None)
+        if proxy_task is not None and not proxy_task.done():
+            proxy_task.cancel()
+            client.loop.run_until_complete(asyncio.gather(proxy_task, return_exceptions=True))
         add_task = getattr(locals().get("app"), '_add_source_task', None)
         if add_task is not None and not add_task.done():
             add_task.cancel()
@@ -2041,4 +2101,3 @@ def start_app():
 
 if __name__ == "__main__":
     start_app()
-

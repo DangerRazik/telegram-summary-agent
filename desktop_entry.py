@@ -41,6 +41,10 @@ def self_test():
         assert app.schedule.first_run_limit == 25
         from autostart import startup_command
         assert startup_command().endswith('--autostart')
+        from proxy_settings import ProxySettings
+        test_proxy = ProxySettings.from_link('tg://proxy?server=example.org&port=443&secret='
+                                             + 'ee' + '01' * 16 + b'example.org'.hex())
+        assert test_proxy.client_options()['connection'].__name__ == 'ConnectionTcpMTProxyFakeTLS'
         app.schedule.save(app._schedule_path)
         assert Path(gui.DB_NAME).exists() if hasattr(gui, 'DB_NAME') else True
         app.destroy()
@@ -69,8 +73,11 @@ def main():
             raise
         import ctypes
         from app_paths import APP_DIR
+        from credential_session import CredentialError
         text = ('Не удалось запустить приложение. Проверьте файл .env рядом с TelegramSummaryAgent.exe.\n\n'
                 f'Папка приложения: {APP_DIR}\nТип ошибки: {type(error).__name__}')
+        if isinstance(error, CredentialError):
+            text = str(error)
         ctypes.windll.user32.MessageBoxW(None, text, 'Telegram Summary Agent', 0x10)
 
 

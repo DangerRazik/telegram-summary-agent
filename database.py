@@ -149,6 +149,20 @@ def get_pending_delivery():
         connection.close()
 
 
+def retarget_pending_delivery(account_id, target):
+    """Apply the selected transport only to this account's unsent summaries."""
+    if type(account_id) is not int or account_id <= 0 or target not in ('saved', 'bot'):
+        raise ValueError('Неверный получатель сводки')
+    connection = sqlite3.connect(DB_NAME)
+    try:
+        with connection:
+            connection.execute(
+                'UPDATE delivery_outbox SET target=? WHERE recipient_id=? AND target<>?',
+                (target, account_id, target))
+    finally:
+        connection.close()
+
+
 def mark_delivered(delivery_id):
     connection = sqlite3.connect(DB_NAME)
     try:

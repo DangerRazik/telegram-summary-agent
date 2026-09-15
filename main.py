@@ -3,6 +3,7 @@ import os
 from dotenv import load_dotenv
 from telethon import TelegramClient
 from summarizer import summarize_text
+from credential_session import CredentialSession
 
 from database import (
     create_database,
@@ -23,8 +24,9 @@ if not api_id or not api_hash:
     print("Не указаны TELEGRAM_API_ID или TELEGRAM_API_HASH")
     raise SystemExit
 
+session = CredentialSession()
 client = TelegramClient(
-    "telegram_summary_session",
+    session,
     int(api_id),
     api_hash
 )
